@@ -1,13 +1,16 @@
 #![allow(dead_code)]
 
-use core::ffi::{c_void, c_char, c_int};
-use axhal::arch::TrapFrame;
-use axhal::trap::{register_trap_handler, SYSCALL};
+use alloc::vec;
+use arceos_posix_api as api;
 use axerrno::LinuxError;
+use axhal::arch::TrapFrame;
+use axhal::mem::VirtAddr;
+use axhal::paging::MappingFlags;
+use axhal::trap::{register_trap_handler, SYSCALL};
 use axtask::current;
 use axtask::TaskExtRef;
-use axhal::paging::MappingFlags;
-use arceos_posix_api as api;
+use core::ffi::{c_char, c_int, c_void};
+use memory_addr::VirtAddrRange;
 
 const SYS_IOCTL: usize = 29;
 const SYS_OPENAT: usize = 56;
@@ -100,9 +103,14 @@ bitflags::bitflags! {
 fn handle_syscall(tf: &TrapFrame, syscall_num: usize) -> isize {
     ax_println!("handle_syscall [{}] ...", syscall_num);
     let ret = match syscall_num {
-         SYS_IOCTL => sys_ioctl(tf.arg0() as _, tf.arg1() as _, tf.arg2() as _) as _,
+        SYS_IOCTL => sys_ioctl(tf.arg0() as _, tf.arg1() as _, tf.arg2() as _) as _,
         SYS_SET_TID_ADDRESS => sys_set_tid_address(tf.arg0() as _),
-        SYS_OPENAT => sys_openat(tf.arg0() as _, tf.arg1() as _, tf.arg2() as _, tf.arg3() as _),
+        SYS_OPENAT => sys_openat(
+            tf.arg0() as _,
+            tf.arg1() as _,
+            tf.arg2() as _,
+            tf.arg3() as _,
+        ),
         SYS_CLOSE => sys_close(tf.arg0() as _),
         SYS_READ => sys_read(tf.arg0() as _, tf.arg1() as _, tf.arg2() as _),
         SYS_WRITE => sys_write(tf.arg0() as _, tf.arg1() as _, tf.arg2() as _),
@@ -110,11 +118,11 @@ fn handle_syscall(tf: &TrapFrame, syscall_num: usize) -> isize {
         SYS_EXIT_GROUP => {
             ax_println!("[SYS_EXIT_GROUP]: system is exiting ..");
             axtask::exit(tf.arg0() as _)
-        },
+        }
         SYS_EXIT => {
             ax_println!("[SYS_EXIT]: system is exiting ..");
             axtask::exit(tf.arg0() as _)
-        },
+        }
         SYS_MMAP => sys_mmap(
             tf.arg0() as _,
             tf.arg1() as _,
@@ -131,6 +139,8 @@ fn handle_syscall(tf: &TrapFrame, syscall_num: usize) -> isize {
     ret
 }
 
+const PAGE_SIZE_4K: usize = 4096;
+
 #[allow(unused_variables)]
 fn sys_mmap(
     addr: *mut usize,
@@ -138,9 +148,93 @@ fn sys_mmap(
     prot: i32,
     flags: i32,
     fd: i32,
-    _offset: isize,
+    offset: isize,
 ) -> isize {
-    unimplemented!("no sys_mmap!");
+    // api::sys_mmap(addr, lenght, prot, flags, fd, offset) as isize
+    //
+    let curr = axtask::current();
+    // let task_ext = TaskExtRef::task_ext(curr.as_task_ref());
+    let mut uspace = curr.task_ext().aspace.lock();
+
+    // Convert prot to MappingFlags
+    let prot_flags = MmapProt::from_bits(prot).unwrap();
+    let mut mapping_flags: MappingFlags = prot_flags.into();
+
+    // Handle flags
+    let mmap_flags = MmapFlags::from_bits(flags).unwrap();
+
+    ax_println!(
+        "length-0:{} size:{}, end:{:?}",
+        length,
+        uspace.size(),
+        uspace.end()
+    );
+
+    // Round up length to page size
+    let length = (length + PAGE_SIZE_4K - 1) & !(PAGE_SIZE_4K - 1);
+
+    // Determine the address to map at
+    // let hint = if !addr.is_null() {
+    //     VirtAddr::from(unsafe { *addr })
+    // } else {
+    //     uspace.end() - length // Start from top of address space
+    // };
+    // let va = VirtAddr::from(unsafe { *addr });
+
+    // Find a free area
+    // let va = uspace
+    //     .find_free_area(
+    //         hint,
+    //         length,
+    //         VirtAddrRange::new(uspace.base(), uspace.end()),
+    //     )
+    //     .ok_or(LinuxError::ENOMEM)?;
+
+    ax_println!(
+        "length:{} size:{}, end:{:?}",
+        length,
+        uspace.size(),
+        uspace.end()
+    );
+
+    let hint = if !addr.is_null() {
+        VirtAddr::from(unsafe { *addr })
+    } else {
+        VirtAddr::from(0) // Let system choose
+    };
+
+    // if fd < 0 {
+    //     return Err(LinuxError::EBADF);
+    // }
+
+    // Get file size
+    // let file_size = api::sys_lseek(fd, 0, api::SEEK_END) as usize;
+    // if offset as usize + length > file_size {
+    //     return Err(LinuxError::EINVAL);
+    // }
+
+    // For file mapping, we need to read the file content
+    let mut buf = vec![0u8; length];
+    // api::sys_lseek(fd, offset, api::SEEK_SET);
+    let n = api::sys_read(fd, buf.as_mut_ptr() as *mut c_void, length);
+    // if n < 0 {
+    //     return Err(LinuxError::EIO);
+    // }
+
+    // Map the memory and copy file content
+    let va = uspace
+        .find_free_area(
+            hint,
+            length,
+            VirtAddrRange::new(uspace.base(), uspace.end()),
+        )
+        .unwrap();
+
+    uspace.map_alloc(va, length, mapping_flags, true).unwrap();
+
+    uspace.write(va, &buf[..n as usize]).unwrap();
+
+    va.as_usize() as isize
 }
 
 fn sys_openat(dfd: c_int, fname: *const c_char, flags: c_int, mode: api::ctypes::mode_t) -> isize {
