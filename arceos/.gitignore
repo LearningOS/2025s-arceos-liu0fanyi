@@ -11,3 +11,4 @@ rusty-tags.vi
 lk_trace.data
 tags
 *.swp
+/.direnv
