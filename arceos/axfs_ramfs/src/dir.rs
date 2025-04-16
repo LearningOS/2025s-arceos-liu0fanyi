@@ -79,6 +79,7 @@ impl VfsNodeOps for DirNode {
     }
 
     fn lookup(self: Arc<Self>, path: &str) -> VfsResult<VfsNodeRef> {
+        log::debug!("look up by my self");
         let (name, rest) = split_path(path);
         let node = match name {
             "" | "." => Ok(self.clone() as VfsNodeRef),
@@ -163,6 +164,62 @@ impl VfsNodeOps for DirNode {
         } else {
             self.remove_node(name)
         }
+    }
+
+    fn rename(&self, src: &str, dst: &str) -> VfsResult {
+        // 巨大假设
+        // 只处理了一级目录
+        // 鉴于上层rename已经将src处理成对应的rest，/tmp/f1在tmp是一个ramfs的根目录情况下只能拿到f1路径，因而split_path获得f1
+        // 相对的dst是完整的/tmp/f2，需要通过split_path的dst_rest来获得rename的target命名
+        // TODO: 虽然这样应该在上层处理才对吧？
+
+        // 1. 解析源路径和目标路径
+        let (src_name, src_rest) = split_path(src);
+        let (dst_name, dst_rest) = split_path(dst);
+        // log::debug!(
+        //     "rename at ramfs: {} -> {:?}, {} -> {:?}",
+        //     src_name,
+        //     src_rest,
+        //     dst_name,
+        //     dst_rest
+        // );
+
+        let dst_rest = dst_rest.unwrap();
+
+        let src_node = self
+            .children
+            .read()
+            .get(src_name)
+            .ok_or(VfsError::NotFound)?
+            .clone();
+
+        // 4. 检查目标是否存在
+        let mut children = self.children.write();
+
+        if let Some(dst_node) = children.get(dst_name) {
+            // 4.1 如果是目录，检查是否为空
+            if let Some(dir) = dst_node.as_any().downcast_ref::<DirNode>() {
+                if !dir.children.read().is_empty() {
+                    log::debug!("bug this2?: {} -> {}", src, dst);
+                    return Err(VfsError::DirectoryNotEmpty);
+                }
+            }
+            // 4.2 移除现有目标节点
+            children.remove(dst_name);
+        }
+
+        // 5. 更新目录项
+        children.remove(src_name);
+        children.insert(dst_rest.into(), src_node.clone());
+
+        // 6. 如果是目录，更新其parent引用
+        if let Some(dir_node) = src_node.as_any().downcast_ref::<DirNode>() {
+            let vfs_node: Arc<dyn VfsNodeOps> = self.this.upgrade().unwrap();
+
+            dir_node.set_parent(Some(&vfs_node));
+        }
+
+        Ok(())
     }
 
     axfs_vfs::impl_vfs_dir_default! {}
