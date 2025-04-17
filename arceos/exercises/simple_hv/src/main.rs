@@ -17,13 +17,14 @@ mod task;
 mod vcpu;
 
 use crate::regs::GprIndex::{A0, A1};
-use axhal::mem::{PhysAddr, VirtAddr, PAGE_SIZE_4K};
+use axhal::mem::{MemoryAddr, PhysAddr, VirtAddr, PAGE_SIZE_4K};
 use axhal::paging::{MappingFlags, PageTable};
 use axmm::{kernel_aspace, AddrSpace};
 use axtask::TaskExtRef;
 use csrs::defs::hstatus;
 use csrs::{RiscvCsrTrait, CSR};
 use loader::load_vm_image;
+use riscv::addr::AddressL2;
 use riscv::register::{scause, sstatus, stval};
 use sbi::SbiMessage;
 use tock_registers::LocalRegisterCopy;
@@ -109,12 +110,13 @@ fn vmexit_handler(ctx: &mut VmCpuRegisters, uspace: &mut AddrSpace) -> bool {
             }
         }
         Trap::Exception(Exception::IllegalInstruction) => {
-            // let instr = stval::read();
             ax_println!(
                 "Bad instruction: {:#x} sepc: {:#x}",
                 stval::read(),
                 ctx.guest_regs.sepc
             );
+
+            ctx.guest_regs.gprs.set_reg(A1, 0x1234);
             ctx.guest_regs.sepc += 4;
         }
         Trap::Exception(Exception::LoadGuestPageFault) => {
@@ -123,17 +125,32 @@ fn vmexit_handler(ctx: &mut VmCpuRegisters, uspace: &mut AddrSpace) -> bool {
                 stval::read(),
                 ctx.guest_regs.sepc
             );
-            // axhal::trap::PAGE_FAULT;
 
             let vaddr = stval::read();
+            let start = vaddr.align_down_4k();
 
-            let vaddr = VirtAddr::from(unsafe { vaddr });
+            uspace
+                .map_alloc(
+                    start.into(),
+                    PAGE_SIZE_4K,
+                    MappingFlags::READ
+                        | MappingFlags::WRITE
+                        | MappingFlags::EXECUTE
+                        | MappingFlags::USER,
+                    true,
+                )
+                .unwrap();
 
-            uspace.handle_page_fault(
-                vaddr,
-                MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE,
+            let success = uspace.handle_page_fault(
+                vaddr.into(),
+                MappingFlags::READ
+                    | MappingFlags::WRITE
+                    | MappingFlags::EXECUTE
+                    | MappingFlags::USER,
             );
-            ctx.guest_regs.sepc += 4;
+
+            let data: [u8; 8] = unsafe { core::mem::transmute(0x6688u64.to_le()) };
+            uspace.write(vaddr.into(), &data);
         }
         _ => {
             ax_println!(
