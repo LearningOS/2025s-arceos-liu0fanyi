@@ -1,5 +1,6 @@
 /target
 /.vscode
+/.direnv
 .DS_Store
 *.asm
 *.img
