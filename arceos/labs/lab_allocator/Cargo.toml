@@ -12,3 +12,4 @@ allocator = { git = "https://github.com/arceos-org/allocator.git", tag = "v0.1.0
 ] }
 axlog = { workspace = true }
 buddy_system_allocator = { version = "0.10", default-features = false }
+rlsf = { version = "0.2" }
